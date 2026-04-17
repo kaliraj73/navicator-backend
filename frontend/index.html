@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Navicator IDE</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+    #app { display: grid; grid-template-columns: 260px 1fr; height: 100%; }
+    #sidebar { border-right: 1px solid #ddd; padding: 12px; }
+    #editor { height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <h3>Navicator</h3>
+      <p>Project explorer, chat, terminal, snippets, and memory panels are loaded dynamically.</p>
+    </aside>
+    <main id="editor"></main>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
+  <script>
+    require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs' } });
+    require(['vs/editor/editor.main'], function () {
+      monaco.editor.create(document.getElementById('editor'), {
+        value: '// Welcome to Navicator IDE\nconsole.log("Hello, world");',
+        language: 'javascript',
+        theme: 'vs-dark',
+        automaticLayout: true,
+      });
+    });
+  </script>
+</body>
+</html>
