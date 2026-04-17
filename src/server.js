@@ -11,15 +11,41 @@ const os = require('os');
 
 const app = express();
 const server = http.createServer(app);
-const PORT = process.env.PORT || 8080;
-const WS_PORT = process.env.WS_PORT || 8081;
+
+const PORT = Number(process.env.PORT) || 8080;
+const WS_PORT = Number(process.env.WS_PORT) || 8081;
 const WORKSPACE_DIR = path.resolve(process.env.WORKSPACE_DIR || './workspace');
+const MAX_TERMINALS = Number(process.env.MAX_TERMINALS) || 5;
+const TERMINAL_TIMEOUT = Number(process.env.TERMINAL_TIMEOUT) || 1800000;
 
 app.use(cors());
 app.use(express.json());
 
 const terminals = new Map();
+const terminalTimers = new Map();
 const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
+
+function resolveWorkspacePath(relativePath = '') {
+  const resolvedPath = path.resolve(WORKSPACE_DIR, relativePath);
+  const workspacePrefix = `${WORKSPACE_DIR}${path.sep}`;
+  if (resolvedPath !== WORKSPACE_DIR && !resolvedPath.startsWith(workspacePrefix)) {
+    throw new Error('Path escapes workspace directory');
+  }
+  return resolvedPath;
+}
+
+function resetTerminalTimeout(sessionId, terminal) {
+  const existingTimer = terminalTimers.get(sessionId);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  const timeoutId = setTimeout(() => {
+    terminal.kill();
+    terminals.delete(sessionId);
+    terminalTimers.delete(sessionId);
+  }, TERMINAL_TIMEOUT);
+
+  terminalTimers.set(sessionId, timeoutId);
+}
 
 // Health check
 app.get('/health', (req, res) => {
@@ -42,7 +68,7 @@ app.get('/api/files/tree', async (req, res) => {
 
 app.get('/api/files/read', async (req, res) => {
   try {
-    const filePath = path.join(WORKSPACE_DIR, req.query.path);
+    const filePath = resolveWorkspacePath(req.query.path);
     const content = await fs.readFile(filePath, 'utf-8');
     res.json({ path: req.query.path, content });
   } catch (error) {
@@ -52,7 +78,7 @@ app.get('/api/files/read', async (req, res) => {
 
 app.post('/api/files/write', async (req, res) => {
   try {
-    const filePath = path.join(WORKSPACE_DIR, req.body.path);
+    const filePath = resolveWorkspacePath(req.body.path);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, req.body.content);
     res.json({ success: true });
@@ -84,13 +110,25 @@ const wss = new WebSocket.Server({ port: WS_PORT });
 
 wss.on('connection', (ws) => {
   console.log('Terminal connected');
+  let sessionId = null;
   let terminal = null;
 
   ws.on('message', (message) => {
-    const data = JSON.parse(message);
+    let data;
+    try {
+      data = JSON.parse(message);
+    } catch (error) {
+      ws.send(JSON.stringify({ type: 'error', error: 'Invalid JSON payload' }));
+      return;
+    }
 
     if (data.type === 'create') {
-      const sessionId = uuidv4();
+      if (terminals.size >= MAX_TERMINALS) {
+        ws.send(JSON.stringify({ type: 'error', error: 'Maximum number of terminals reached' }));
+        return;
+      }
+
+      sessionId = uuidv4();
       terminal = pty.spawn(shell, [], {
         name: 'xterm-color',
         cwd: WORKSPACE_DIR,
@@ -98,25 +136,49 @@ wss.on('connection', (ws) => {
       });
 
       terminals.set(sessionId, terminal);
+      resetTerminalTimeout(sessionId, terminal);
 
       terminal.onData((output) => {
         ws.send(JSON.stringify({ type: 'output', data: output, sessionId }));
       });
 
+      terminal.onExit(() => {
+        terminals.delete(sessionId);
+        const timeoutId = terminalTimers.get(sessionId);
+        if (timeoutId) clearTimeout(timeoutId);
+        terminalTimers.delete(sessionId);
+      });
+
       ws.send(JSON.stringify({ type: 'created', sessionId }));
     } else if (data.type === 'input' && terminal) {
       terminal.write(data.data);
+      resetTerminalTimeout(sessionId, terminal);
     }
   });
 
   ws.on('close', () => {
-    if (terminal) terminal.kill();
+    if (terminal) {
+      terminal.kill();
+    }
   });
 });
 
-// Start servers
-server.listen(PORT, () => {
-  console.log(`✅ API Server: http://localhost:${PORT}`);
-  console.log(`✅ WebSocket: ws://localhost:${WS_PORT}`);
-  console.log(`📂 Workspace: ${WORKSPACE_DIR}`);
-});
+async function ensureWorkspaceDir() {
+  await fs.mkdir(WORKSPACE_DIR, { recursive: true });
+}
+
+ensureWorkspaceDir()
+  .then(() => {
+    // Start servers
+    server.listen(PORT, () => {
+      console.log(`✅ API Server: http://localhost:${PORT}`);
+      console.log(`✅ WebSocket: ws://localhost:${WS_PORT}`);
+      console.log(`📂 Workspace: ${WORKSPACE_DIR}`);
+      console.log(`🖥️ Max terminals: ${MAX_TERMINALS}`);
+      console.log(`⏱️ Terminal timeout: ${TERMINAL_TIMEOUT}ms`);
+    });
+  })
+  .catch((error) => {
+    console.error('Failed to initialize workspace directory:', error);
+    process.exit(1);
+  });
